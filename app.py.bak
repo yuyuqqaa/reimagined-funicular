@@ -1,12 +1,29 @@
 from flask import Flask, request, Response, stream_with_context
 import requests
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 import re
 from functools import wraps
 
+# ==================== 配置区域 ====================
 ENABLE_MODIFICATION = True  # 修改开关：True启用修改，False禁用修改
 
+# 主机名配置（根据你的实际情况修改）
+PROXY_HOST = "uscf.996855.xyz"  # 你的代理域名或IP
+PROXY_PORT = ""  # 你的代理端口，如果是80或443可以留空
+PROXY_SCHEME = "https"  # 你的代理协议：http 或 https
+
+# 自动构建代理基础URL
+if PROXY_PORT and PROXY_PORT not in ["80", "443"]:
+    PROXY_BASE_URL = f"{PROXY_SCHEME}://{PROXY_HOST}:{PROXY_PORT}"
+else:
+    PROXY_BASE_URL = f"{PROXY_SCHEME}://{PROXY_HOST}"
+# ==================== 配置结束 ====================
+
 app = Flask(__name__)
+
+def get_proxy_base_url():
+    """获取代理基础URL"""
+    return PROXY_BASE_URL
 
 def detect_protocol(domain):
     """检测域名支持的协议（HTTP/HTTPS）"""
@@ -22,9 +39,94 @@ def detect_protocol(domain):
     # 回退到HTTP
     return f"http://{domain}"
 
-def handle_html_rewrite(text, original_url):
-    """处理HTML重写，修复相对链接"""
-    mirror_base = f"{request.scheme}://{request.host}{request.path}"
+def fix_encoding(text, response_encoding=None):
+    """修复编码问题，确保文本正确解码"""
+    if isinstance(text, bytes):
+        # 如果是字节流，尝试多种编码方式解码
+        encodings = ['utf-8', 'gbk', 'gb2312', 'iso-8859-1']
+        
+        if response_encoding and response_encoding.lower() in ['utf-8', 'gbk', 'gb2312']:
+            encodings.insert(0, response_encoding)
+        
+        for encoding in encodings:
+            try:
+                return text.decode(encoding)
+            except UnicodeDecodeError:
+                continue
+        
+        # 如果所有编码都失败，使用 UTF-8 并忽略错误
+        return text.decode('utf-8', errors='ignore')
+    
+    return text
+
+def handle_m3u8_rewrite(content, base_url, original_url):
+    """专门处理 m3u8 文件的重写"""
+    if not content.strip():
+        return content
+    
+    lines = content.split('\n')
+    rewritten_lines = []
+    
+    # 使用配置的代理基础URL
+    proxy_base = get_proxy_base_url()
+    
+    for line in lines:
+        line = line.strip()
+        
+        # 跳过空行和注释行（但保留注释）
+        if not line:
+            rewritten_lines.append(line)
+            continue
+            
+        # 保留注释行
+        if line.startswith('#'):
+            rewritten_lines.append(line)
+            continue
+            
+        # 处理TS文件路径
+        if line.endswith(('.ts', '.m3u8', '.m3u')):
+            # 如果是绝对路径
+            if line.startswith(('http://', 'https://')):
+                # 已经是完整URL，直接重写为代理URL
+                ts_url = line
+                # 提取路径部分用于构建代理URL
+                parsed_ts = urlparse(ts_url)
+                proxy_ts_url = f"{proxy_base}/{parsed_ts.netloc}{parsed_ts.path}"
+                if parsed_ts.query:
+                    proxy_ts_url += f"?{parsed_ts.query}"
+                rewritten_lines.append(proxy_ts_url)
+                
+            # 如果是相对路径
+            else:
+                # 构建完整的URL
+                if base_url.endswith('.m3u8'):
+                    # 如果base_url是m3u8文件，使用其目录作为基础
+                    base_dir = base_url.rsplit('/', 1)[0] + '/' if '/' in base_url else ''
+                    full_ts_url = urljoin(base_dir, line)
+                else:
+                    full_ts_url = urljoin(base_url, line)
+                
+                # 转换为代理URL
+                parsed_ts = urlparse(full_ts_url)
+                proxy_ts_url = f"{proxy_base}/{parsed_ts.netloc}{parsed_ts.path}"
+                if parsed_ts.query:
+                    proxy_ts_url += f"?{parsed_ts.query}"
+                rewritten_lines.append(proxy_ts_url)
+        else:
+            # 非TS文件路径，保持原样
+            rewritten_lines.append(line)
+    
+    return '\n'.join(rewritten_lines)
+
+def handle_html_rewrite(text, original_url, response_encoding=None):
+    """处理HTML重写，修复相对链接和编码问题"""
+    # 首先修复编码
+    if isinstance(text, bytes):
+        text = fix_encoding(text, response_encoding)
+    
+    # 使用配置的代理基础URL
+    proxy_base = get_proxy_base_url()
+    mirror_base = f"{proxy_base}{request.path}"
     
     # 替换相对链接
     def replace_relative_links(match):
@@ -39,12 +141,16 @@ def handle_html_rewrite(text, original_url):
         return f'<{tag_type} {prefix}"{mirror_base}/{path}"'
     
     # 使用更精确的正则表达式匹配a和img标签
-    modified_text = re.sub(
-        r'<(a|img)([^>]*(href|src)=["\'])(?!https?://|//|data:|javascript:)([^"\']+)',
-        lambda m: f'<{m.group(1)}{m.group(2)}{mirror_base}/{m.group(4)}',
-        text,
-        flags=re.IGNORECASE
-    )
+    try:
+        modified_text = re.sub(
+            r'<(a|img)([^>]*(href|src)=["\'])(?!https?://|//|data:|javascript:)([^"\']+)',
+            lambda m: f'<{m.group(1)}{m.group(2)}{mirror_base}/{m.group(4)}',
+            text,
+            flags=re.IGNORECASE
+        )
+    except UnicodeError:
+        # 如果编码错误，返回原始文本
+        modified_text = text
     
     return modified_text
 
@@ -54,15 +160,49 @@ def remove_restrictive_headers(headers):
         'content-security-policy',
         'Content-Security-Policy',
         'x-frame-options',
-        'X-Frame-Options'
+        'X-Frame-Options',
+        'access-control-allow-origin'
     ]
     
     new_headers = {}
     for key, value in headers.items():
-        if key not in headers_to_remove:
+        if key.lower() not in [h.lower() for h in headers_to_remove]:
             new_headers[key] = value
     
     return new_headers
+
+def get_response_encoding(response):
+    """从响应中获取正确的编码"""
+    # 从Content-Type头获取编码
+    content_type = response.headers.get('content-type', '')
+    if 'charset=' in content_type:
+        charset = re.search(r'charset=([^\s;]+)', content_type)
+        if charset:
+            return charset.group(1).lower()
+    
+    # 从HTML meta标签获取编码
+    if response.headers.get('content-type', '').startswith('text/html'):
+        try:
+            # 查找meta标签中的charset
+            charset_match = re.search(r'<meta[^>]*charset=([^\s"\'>]+)', response.text[:4096], re.IGNORECASE)
+            if charset_match:
+                return charset_match.group(1).lower()
+        except:
+            pass
+    
+    # 使用响应对象的编码
+    if hasattr(response, 'encoding') and response.encoding:
+        return response.encoding.lower()
+    
+    return 'utf-8'  # 默认使用UTF-8
+
+def is_m3u8_content(content_type, url):
+    """判断是否为m3u8内容"""
+    if content_type in ['application/vnd.apple.mpegurl', 'audio/mpegurl', 'application/x-mpegurl']:
+        return True
+    if url.endswith('.m3u8') or '.m3u8?' in url:
+        return True
+    return False
 
 @app.route('/', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
 def root_handler():
@@ -89,6 +229,9 @@ def proxy_handler(url_path):
         # 准备请求头
         headers = {key: value for key, value in request.headers if key.lower() != 'host'}
         
+        # 添加必要的请求头
+        headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        
         # 准备请求体
         data = request.get_data() if request.method in ['POST', 'PUT', 'PATCH'] else None
         
@@ -100,20 +243,33 @@ def proxy_handler(url_path):
             data=data,
             stream=True,
             allow_redirects=True,
-            cookies=request.cookies
+            cookies=request.cookies,
+            timeout=30
         )
         
-        # 处理HTML重写
+        # 获取正确的编码
+        response_encoding = get_response_encoding(response)
+        
+        # 处理m3u8文件
+        content_type = response.headers.get('content-type', '').lower()
         if (ENABLE_MODIFICATION and 
-            response.headers.get('content-type', '').startswith('text/html')):
+            is_m3u8_content(content_type, actual_url_str)):
             
-            content = response.text
+            # 获取m3u8内容
+            if hasattr(response, 'text'):
+                content = response.text
+            else:
+                content = fix_encoding(response.content, response_encoding)
             
-            # 重写HTML内容
-            modified_content = handle_html_rewrite(content, request.url)
+            # 重写m3u8中的TS文件路径
+            modified_content = handle_m3u8_rewrite(content, actual_url_str, request.url)
             
-            # 移除限制性头信息
+            # 设置正确的Content-Type
             response_headers = remove_restrictive_headers(response.headers)
+            response_headers['Content-Type'] = 'application/vnd.apple.mpegurl'
+            response_headers['Access-Control-Allow-Origin'] = '*'
+            response_headers['Access-Control-Allow-Headers'] = '*'
+            response_headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, PATCH'
             
             return Response(
                 modified_content,
@@ -121,67 +277,71 @@ def proxy_handler(url_path):
                 headers=response_headers
             )
         
-        # 对于非HTML内容，流式传输以提高性能
-        def generate():
-            for chunk in response.iter_content(chunk_size=8192):
-                yield chunk
+        # 处理HTML重写
+        elif (ENABLE_MODULATION and 
+              response.headers.get('content-type', '').startswith('text/html')):
+            
+            # 使用正确的编码处理内容
+            if hasattr(response, 'text'):
+                content = response.text
+            else:
+                content = fix_encoding(response.content, response_encoding)
+            
+            # 重写HTML内容
+            modified_content = handle_html_rewrite(content, request.url, response_encoding)
+            
+            # 移除限制性头信息
+            response_headers = remove_restrictive_headers(response.headers)
+            
+            return Response(
+                modified_content,
+                status=response.status_code,
+                headers=response_headers,
+                content_type=f"text/html; charset=utf-8"
+            )
         
-        # 移除限制性头信息
-        response_headers = remove_restrictive_headers(response.headers)
+        # 对于TS文件和其他媒体文件，直接流式传输
+        elif url_path.endswith(('.ts', '.m4s', '.mp4', '.webm')):
+            def generate():
+                for chunk in response.iter_content(chunk_size=8192):
+                    yield chunk
+            
+            response_headers = remove_restrictive_headers(response.headers)
+            # 添加CORS头以便跨域访问
+            response_headers['Access-Control-Allow-Origin'] = '*'
+            
+            return Response(
+                stream_with_context(generate()),
+                status=response.status_code,
+                headers=response_headers
+            )
         
-        return Response(
-            stream_with_context(generate()),
-            status=response.status_code,
-            headers=response_headers
-        )
+        # 对于非HTML内容，流式传输
+        else:
+            def generate():
+                for chunk in response.iter_content(chunk_size=8192):
+                    yield chunk
+            
+            response_headers = remove_restrictive_headers(response.headers)
+            
+            return Response(
+                stream_with_context(generate()),
+                status=response.status_code,
+                headers=response_headers
+            )
         
     except requests.exceptions.RequestException as e:
         return f"请求失败: {str(e)}", 500
     except Exception as e:
         return f"服务器错误: {str(e)}", 500
 
-# 更高级的HTML重写版本（可选）
-def advanced_html_rewrite(text, base_url):
-    """更高级的HTML重写，处理更多标签和属性"""
-    mirror_base = f"{request.scheme}://{request.host}{request.path}"
-    
-    # 需要重写的标签和属性
-    tags_to_rewrite = {
-        'a': ['href'],
-        'img': ['src'],
-        'link': ['href'],
-        'script': ['src'],
-        'form': ['action'],
-        'iframe': ['src']
-    }
-    
-    modified_text = text
-    
-    for tag, attributes in tags_to_rewrite.items():
-        for attr in attributes:
-            # 匹配相对路径和根路径相对路径
-            pattern = rf'<{tag}([^>]*){attr}=["\']((?!https?://|//|data:|javascript:)[^"\']*)["\']'
-            
-            def replace_callback(match):
-                full_match = match.group(0)
-                tag_attrs = match.group(1)
-                path = match.group(2)
-                
-                # 跳过特殊路径
-                if path.startswith(('http://', 'https://', '//', 'data:', 'javascript:', 'mailto:', 'tel:')):
-                    return full_match
-                
-                # 处理绝对路径（以/开头）
-                if path.startswith('/'):
-                    path = path[1:]
-                
-                return f'<{tag}{tag_attrs}{attr}="{mirror_base}/{path}"'
-            
-            modified_text = re.sub(pattern, replace_callback, modified_text, flags=re.IGNORECASE)
-    
-    return modified_text
-
-
+# 添加CORS支持
+@app.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Headers', '*')
+    response.headers.add('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH')
+    return response
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)

@@ -1,0 +1,105 @@
+from flask import Flask, request, Response
+import requests
+import re
+
+app = Flask(__name__)
+
+ENABLE_MODIFICATION = True  # 修改开关：True启用修改，False禁用修改
+
+@app.route('/', defaults={'path': ''})
+@app.route('/<path:path>')
+def proxy(path):
+    url_path = request.path
+    
+    if url_path == "/":
+        return Response("请输入 / 后面的链接", status=400, content_type='text/plain')
+    
+    # 获取完整的路径、查询参数和哈希
+    target_url_str = url_path[1:]  # 去掉开头的斜杠
+    if request.query_string:
+        target_url_str += '?' + request.query_string.decode()
+    
+    has_protocol = target_url_str.startswith("http://") or target_url_str.startswith("https://")
+    
+    if not has_protocol:
+        actual_url_str = detect_protocol(target_url_str)
+    else:
+        actual_url_str = target_url_str
+    
+    try:
+        # 准备请求头
+        headers = {key: value for key, value in request.headers if key.lower() != 'host'}
+        
+        # 发送请求
+        resp = requests.request(
+            method=request.method,
+            url=actual_url_str,
+            headers=headers,
+            data=request.get_data(),
+            cookies=request.cookies,
+            allow_redirects=True,
+            stream=True
+        )
+        
+        # 当修改开关开启且是HTML内容时进行DOM重写
+        if ENABLE_MODIFICATION:
+            content_type = resp.headers.get('content-type', '')
+            if 'text/html' in content_type:
+                return handle_html_rewrite(resp, request)
+        
+        # 返回原始响应
+        response_headers = dict(resp.headers)
+        excluded_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
+        response_headers = {name: value for name, value in response_headers.items() 
+                           if name.lower() not in excluded_headers}
+        
+        return Response(resp.content, status=resp.status_code, headers=response_headers)
+        
+    except Exception as error:
+        return Response(f"请求失败: {str(error)}", status=500, content_type='text/plain')
+
+def detect_protocol(domain):
+    """检测使用HTTP还是HTTPS协议"""
+    try:
+        https_url = f"https://{domain}"
+        response = requests.head(https_url, allow_redirects=True, timeout=5)
+        if response.status_code < 400:
+            return https_url
+    except:
+        pass
+    return f"http://{domain}"
+
+def handle_html_rewrite(response, flask_request):
+    """处理HTML重写，修复相对路径链接"""
+    text = response.text
+    mirror_base = f"{flask_request.host_url}{flask_request.path[1:]}"
+    
+    # 使用正则表达式替换相对路径链接
+    # 替换href属性
+    modified_text = re.sub(
+        r'(<a[^>]+href=["\'])(?!https?://)([^"\']+)',
+        lambda m: f"{m.group(1)}{mirror_base}/{m.group(2)}",
+        text,
+        flags=re.IGNORECASE
+    )
+    
+    # 替换src属性
+    modified_text = re.sub(
+        r'(<img[^>]+src=["\'])(?!https?://)([^"\']+)',
+        lambda m: f"{m.group(1)}{mirror_base}/{m.group(2)}",
+        modified_text,
+        flags=re.IGNORECASE
+    )
+    
+    # 移除可能阻止资源加载的安全策略头
+    response_headers = dict(response.headers)
+    security_headers = ['content-security-policy', 'x-content-security-policy', 
+                       'x-webkit-csp']
+    for header in security_headers:
+        if header in response_headers:
+            del response_headers[header]
+    
+    return Response(modified_text, status=response.status_code, headers=response_headers)
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000, debug=True)

@@ -2,31 +2,13 @@ from flask import Flask, request, Response, stream_with_context
 import requests
 from urllib.parse import urlparse, quote, unquote
 import re
-import chardet
 
 ENABLE_MODIFICATION = True  # 修改开关：True启用修改，False禁用修改
 
 app = Flask(__name__)
 
-def detect_encoding(content):
-    """自动检测内容编码"""
-    try:
-        # 对于短内容，chardet可能检测不准确，使用更保守的策略
-        if len(content) < 100:
-            return 'utf-8'
-        
-        result = chardet.detect(content)
-        encoding = result['encoding'] if result['confidence'] > 0.6 else 'utf-8'
-        
-        # 验证编码是否有效
-        if encoding and encoding.lower() in ['utf-8', 'gbk', 'gb2312', 'big5', 'gb18030']:
-            return encoding.lower()
-        return 'utf-8'
-    except:
-        return 'utf-8'
-
 def safe_decode(content, default_encoding='utf-8'):
-    """安全解码内容，处理编码问题"""
+    """安全解码内容，默认使用UTF-8"""
     if not content:
         return "", default_encoding
         
@@ -37,16 +19,6 @@ def safe_decode(content, default_encoding='utf-8'):
         except UnicodeDecodeError:
             pass
         
-        # 检测编码
-        detected_encoding = detect_encoding(content)
-        
-        # 尝试检测到的编码
-        if detected_encoding and detected_encoding != 'utf-8':
-            try:
-                return content.decode(detected_encoding), detected_encoding
-            except (UnicodeDecodeError, LookupError):
-                pass
-        
         # 尝试常见中文编码
         for encoding in ['gbk', 'gb2312', 'gb18030', 'big5']:
             try:
@@ -54,41 +26,25 @@ def safe_decode(content, default_encoding='utf-8'):
             except (UnicodeDecodeError, LookupError):
                 continue
         
-        # 最后尝试latin-1（不会失败，但可能显示乱码）
-        try:
-            return content.decode('latin-1'), 'latin-1'
-        except:
-            # 最终回退，使用replace处理错误字符
-            return content.decode('utf-8', errors='replace'), 'utf-8'
+        # 最终回退到UTF-8，使用replace处理错误字符
+        return content.decode('utf-8', errors='replace'), 'utf-8'
         
-    except Exception as e:
+    except Exception:
         # 终极回退方案
         try:
             return content.decode('utf-8', errors='replace'), 'utf-8'
         except:
-            # 如果还是失败，返回空字符串
             return "", 'utf-8'
 
 def safe_encode(text, encoding='utf-8'):
-    """安全编码文本"""
+    """安全编码文本，默认使用UTF-8"""
     if not text:
         return b""
         
     try:
-        # 对于latin-1编码，需要特殊处理非ASCII字符
-        if encoding.lower() == 'latin-1' or encoding.lower() == 'iso-8859-1':
-            # 将非latin-1字符转换为HTML实体或替换
-            encoded_text = text.encode('latin-1', errors='replace')
-            return encoded_text
-        else:
-            return text.encode(encoding, errors='replace')
-    except UnicodeEncodeError:
-        # 回退到UTF-8
-        try:
-            return text.encode('utf-8', errors='replace')
-        except:
-            return text.encode('utf-8', errors='ignore')
+        return text.encode(encoding, errors='replace')
     except Exception:
+        # 强制使用UTF-8
         return text.encode('utf-8', errors='replace')
 
 def normalize_chinese_url(url):
@@ -147,13 +103,13 @@ def detect_protocol(domain):
     # 回退到HTTP
     return f"http://{domain}"
 
-def handle_html_rewrite(text, original_url, content_encoding='utf-8'):
-    """处理HTML重写，修复相对链接，支持中文编码"""
+def handle_html_rewrite(text, original_url):
+    """处理HTML重写，修复相对链接"""
     try:
         mirror_base = f"{request.scheme}://{request.host}{request.path}"
         
         # 定义需要重写的标签和属性
-        rewrite_patterns = [
+        rewrite_rules = [
             (r'<(a)([^>]*href=["\'])(?!https?://|//|data:|javascript:|mailto:|tel:)([^"\']*)', 'href'),
             (r'<(img)([^>]*src=["\'])(?!https?://|//|data:|javascript:)([^"\']*)', 'src'),
             (r'<(link)([^>]*href=["\'])(?!https?://|//|data:|javascript:)([^"\']*)', 'href'),
@@ -164,17 +120,16 @@ def handle_html_rewrite(text, original_url, content_encoding='utf-8'):
         
         modified_text = text
         
-        for pattern, attr in rewrite_patterns:
+        for pattern, attr in rewrite_rules:
             def replace_callback(match):
                 try:
-                    full_tag = match.group(0)
                     tag_name = match.group(1)
                     attrs_before = match.group(2)
                     original_path = match.group(3)
                     
                     # 跳过特殊路径
                     if original_path.startswith(('#', 'javascript:', 'mailto:', 'tel:', 'data:')):
-                        return full_tag
+                        return match.group(0)
                     
                     # 处理绝对路径（以/开头）
                     if original_path.startswith('/'):
@@ -182,7 +137,6 @@ def handle_html_rewrite(text, original_url, content_encoding='utf-8'):
                     
                     # URL编码路径中的中文
                     try:
-                        # 先解码再编码，确保中文正确处理
                         decoded_path = unquote(original_path)
                         encoded_path = quote(decoded_path, safe='/@:+?=&%#')
                     except:
@@ -191,8 +145,7 @@ def handle_html_rewrite(text, original_url, content_encoding='utf-8'):
                     new_url = f"{mirror_base}/{encoded_path}"
                     return f'<{tag_name}{attrs_before}{new_url}'
                 
-                except Exception as e:
-                    # 如果替换出错，返回原始内容
+                except Exception:
                     return match.group(0)
             
             modified_text = re.sub(pattern, replace_callback, modified_text, flags=re.IGNORECASE)
@@ -221,8 +174,8 @@ def remove_restrictive_headers(headers):
     
     return new_headers
 
-def fix_content_type(headers, actual_encoding):
-    """修复Content-Type头信息中的编码声明"""
+def fix_content_type(headers):
+    """修复Content-Type头信息，强制使用UTF-8"""
     if not headers:
         return {}
         
@@ -233,20 +186,17 @@ def fix_content_type(headers, actual_encoding):
         return new_headers
     
     if 'text/html' in content_type:
-        # 确保使用UTF-8编码，避免latin-1问题
-        safe_encoding = 'utf-8'  # 强制使用UTF-8避免编码问题
-        
         if 'charset=' in content_type:
-            # 更新编码声明
+            # 更新编码声明为UTF-8
             new_headers['Content-Type'] = re.sub(
                 r'charset=[^;]+', 
-                f'charset={safe_encoding}', 
+                'charset=utf-8', 
                 content_type
             )
         else:
-            # 添加编码声明
+            # 添加UTF-8编码声明
             base_type = content_type.split(';')[0].strip()
-            new_headers['Content-Type'] = f'{base_type}; charset={safe_encoding}'
+            new_headers['Content-Type'] = f'{base_type}; charset=utf-8'
     
     return new_headers
 
@@ -266,7 +216,7 @@ def proxy_handler(url_path):
             decoded_url_path = url_path
         
         # 构建完整的查询字符串和路径
-        query_string = f"?{request.query_string.decode('latin-1')}" if request.query_string else ""
+        query_string = f"?{request.query_string.decode('utf-8', errors='ignore')}" if request.query_string else ""
         target_url_str = decoded_url_path + query_string
         
         # 检查是否包含协议头
@@ -284,7 +234,7 @@ def proxy_handler(url_path):
         
         # 准备请求头
         headers = {key: value for key, value in request.headers if key.lower() != 'host'}
-        headers['User-Agent'] = 'Mozilla/5.0 (兼容代理服务器; 中文支持)'
+        headers['User-Agent'] = 'Mozilla/5.0 (兼容代理服务器)'
         
         # 准备请求体
         data = request.get_data() if request.method in ['POST', 'PUT', 'PATCH'] else None
@@ -306,24 +256,18 @@ def proxy_handler(url_path):
             # 获取原始内容字节
             content_bytes = response.content
             
-            # 安全解码内容（强制使用UTF-8处理，避免latin-1问题）
-            try:
-                # 先尝试UTF-8
-                decoded_content = content_bytes.decode('utf-8')
-                detected_encoding = 'utf-8'
-            except UnicodeDecodeError:
-                # 如果UTF-8失败，使用安全解码
-                decoded_content, detected_encoding = safe_decode(content_bytes)
+            # 安全解码内容（优先UTF-8）
+            decoded_content, detected_encoding = safe_decode(content_bytes)
             
             # 重写HTML内容
-            modified_content = handle_html_rewrite(decoded_content, request.url, detected_encoding)
+            modified_content = handle_html_rewrite(decoded_content, request.url)
             
-            # 重新编码内容（强制使用UTF-8避免编码问题）
+            # 重新编码为UTF-8
             encoded_content = safe_encode(modified_content, 'utf-8')
             
             # 移除限制性头信息并修复Content-Type
             response_headers = remove_restrictive_headers(response.headers)
-            response_headers = fix_content_type(response_headers, 'utf-8')  # 强制使用UTF-8
+            response_headers = fix_content_type(response_headers)
             
             # 确保有正确的Content-Type
             if 'Content-Type' not in response_headers and 'content-type' not in response_headers:
@@ -359,8 +303,6 @@ def proxy_handler(url_path):
         return "请求超时", 504, {'Content-Type': 'text/html; charset=utf-8'}
     except requests.exceptions.RequestException as e:
         return f"请求失败: {str(e)}", 500, {'Content-Type': 'text/html; charset=utf-8'}
-    except UnicodeDecodeError as e:
-        return f"编码处理错误: {str(e)}", 500, {'Content-Type': 'text/html; charset=utf-8'}
     except Exception as e:
         app.logger.error(f"服务器错误: {str(e)}")
         return f"服务器错误: {str(e)}", 500, {'Content-Type': 'text/html; charset=utf-8'}
@@ -372,28 +314,40 @@ def add_cors_headers(response):
     response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, PATCH, OPTIONS'
     response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
     
-    # 确保响应有正确的编码头
+    # 确保响应有正确的UTF-8编码头
     if 'Content-Type' in response.headers and 'text/' in response.headers['Content-Type']:
         if 'charset=' not in response.headers['Content-Type']:
             response.headers['Content-Type'] = response.headers['Content-Type'] + '; charset=utf-8'
     
     return response
 
+# 简化的HTML重写版本（可选）
+def simple_html_rewrite(text, base_url):
+    """简化的HTML重写，只处理最基本的标签"""
+    mirror_base = f"{request.scheme}://{request.host}{request.path}"
+    
+    # 简单的替换规则
+    replacements = [
+        (r'href="/([^"]*)"', f'href="{mirror_base}/\\1"'),
+        (r'src="/([^"]*)"', f'src="{mirror_base}/\\1"'),
+        (r"href='/([^']*)'", f"href='{mirror_base}/\\1'"),
+        (r"src='/([^']*)'", f"src='{mirror_base}/\\1'"),
+    ]
+    
+    modified_text = text
+    for pattern, replacement in replacements:
+        modified_text = re.sub(pattern, replacement, modified_text)
+    
+    return modified_text
+
 if __name__ == '__main__':
-    # 设置正确的编码环境
+    # 设置UTF-8环境
     import os
     import sys
     import io
     
-    # 设置系统编码
-    if hasattr(sys, 'setdefaultencoding'):
-        sys.setdefaultencoding('utf-8')
-    
-    # 设置标准输出的编码
+    # 设置标准输出的编码为UTF-8
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
-    
-    # 设置环境变量
-    os.environ['PYTHONIOENCODING'] = 'utf-8'
     
     app.run(host='0.0.0.0', port=5000, debug=True)

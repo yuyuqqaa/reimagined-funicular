@@ -13,7 +13,7 @@ jobs:
         
       - name: 输出frpc.ini
         run: |
-          cd ~
+          #cd ~
           echo "${{ secrets.INI}}" | base64 --decode > frpc.ini
 
       - name: 执行长时间任务

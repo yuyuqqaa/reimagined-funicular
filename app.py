@@ -22,8 +22,32 @@ def detect_protocol(domain):
     # 回退到HTTP
     return f"http://{domain}"
 
-def handle_html_rewrite(text, original_url):
-    """处理HTML重写，修复相对链接"""
+def fix_encoding(text, response_encoding=None):
+    """修复编码问题，确保文本正确解码"""
+    if isinstance(text, bytes):
+        # 如果是字节流，尝试多种编码方式解码
+        encodings = ['utf-8', 'gbk', 'gb2312', 'iso-8859-1']
+        
+        if response_encoding and response_encoding.lower() in ['utf-8', 'gbk', 'gb2312']:
+            encodings.insert(0, response_encoding)
+        
+        for encoding in encodings:
+            try:
+                return text.decode(encoding)
+            except UnicodeDecodeError:
+                continue
+        
+        # 如果所有编码都失败，使用 UTF-8 并忽略错误
+        return text.decode('utf-8', errors='ignore')
+    
+    return text
+
+def handle_html_rewrite(text, original_url, response_encoding=None):
+    """处理HTML重写，修复相对链接和编码问题"""
+    # 首先修复编码
+    if isinstance(text, bytes):
+        text = fix_encoding(text, response_encoding)
+    
     mirror_base = f"{request.scheme}://{request.host}{request.path}"
     
     # 替换相对链接
@@ -39,12 +63,16 @@ def handle_html_rewrite(text, original_url):
         return f'<{tag_type} {prefix}"{mirror_base}/{path}"'
     
     # 使用更精确的正则表达式匹配a和img标签
-    modified_text = re.sub(
-        r'<(a|img)([^>]*(href|src)=["\'])(?!https?://|//|data:|javascript:)([^"\']+)',
-        lambda m: f'<{m.group(1)}{m.group(2)}{mirror_base}/{m.group(4)}',
-        text,
-        flags=re.IGNORECASE
-    )
+    try:
+        modified_text = re.sub(
+            r'<(a|img)([^>]*(href|src)=["\'])(?!https?://|//|data:|javascript:)([^"\']+)',
+            lambda m: f'<{m.group(1)}{m.group(2)}{mirror_base}/{m.group(4)}',
+            text,
+            flags=re.IGNORECASE
+        )
+    except UnicodeError:
+        # 如果编码错误，返回原始文本
+        modified_text = text
     
     return modified_text
 
@@ -63,6 +91,31 @@ def remove_restrictive_headers(headers):
             new_headers[key] = value
     
     return new_headers
+
+def get_response_encoding(response):
+    """从响应中获取正确的编码"""
+    # 从Content-Type头获取编码
+    content_type = response.headers.get('content-type', '')
+    if 'charset=' in content_type:
+        charset = re.search(r'charset=([^\s;]+)', content_type)
+        if charset:
+            return charset.group(1).lower()
+    
+    # 从HTML meta标签获取编码
+    if response.headers.get('content-type', '').startswith('text/html'):
+        try:
+            # 查找meta标签中的charset
+            charset_match = re.search(r'<meta[^>]*charset=([^\s"\'>]+)', response.text[:4096], re.IGNORECASE)
+            if charset_match:
+                return charset_match.group(1).lower()
+        except:
+            pass
+    
+    # 使用响应对象的编码
+    if hasattr(response, 'encoding') and response.encoding:
+        return response.encoding.lower()
+    
+    return 'utf-8'  # 默认使用UTF-8
 
 @app.route('/', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
 def root_handler():
@@ -103,25 +156,35 @@ def proxy_handler(url_path):
             cookies=request.cookies
         )
         
+        # 获取正确的编码
+        response_encoding = get_response_encoding(response)
+        
         # 处理HTML重写
         if (ENABLE_MODIFICATION and 
             response.headers.get('content-type', '').startswith('text/html')):
             
-            content = response.text
+            # 使用正确的编码处理内容
+            if hasattr(response, 'text'):
+                content = response.text
+            else:
+                # 如果response.text不可用，手动解码
+                content = fix_encoding(response.content, response_encoding)
             
             # 重写HTML内容
-            modified_content = handle_html_rewrite(content, request.url)
+            modified_content = handle_html_rewrite(content, request.url, response_encoding)
             
             # 移除限制性头信息
             response_headers = remove_restrictive_headers(response.headers)
             
+            # 确保返回正确的编码
             return Response(
                 modified_content,
                 status=response.status_code,
-                headers=response_headers
+                headers=response_headers,
+                content_type=f"text/html; charset=utf-8"  # 强制使用UTF-8
             )
         
-        # 对于非HTML内容，流式传输以提高性能
+        # 对于非HTML内容，流式传输
         def generate():
             for chunk in response.iter_content(chunk_size=8192):
                 yield chunk
@@ -139,49 +202,6 @@ def proxy_handler(url_path):
         return f"请求失败: {str(e)}", 500
     except Exception as e:
         return f"服务器错误: {str(e)}", 500
-
-# 更高级的HTML重写版本（可选）
-def advanced_html_rewrite(text, base_url):
-    """更高级的HTML重写，处理更多标签和属性"""
-    mirror_base = f"{request.scheme}://{request.host}{request.path}"
-    
-    # 需要重写的标签和属性
-    tags_to_rewrite = {
-        'a': ['href'],
-        'img': ['src'],
-        'link': ['href'],
-        'script': ['src'],
-        'form': ['action'],
-        'iframe': ['src']
-    }
-    
-    modified_text = text
-    
-    for tag, attributes in tags_to_rewrite.items():
-        for attr in attributes:
-            # 匹配相对路径和根路径相对路径
-            pattern = rf'<{tag}([^>]*){attr}=["\']((?!https?://|//|data:|javascript:)[^"\']*)["\']'
-            
-            def replace_callback(match):
-                full_match = match.group(0)
-                tag_attrs = match.group(1)
-                path = match.group(2)
-                
-                # 跳过特殊路径
-                if path.startswith(('http://', 'https://', '//', 'data:', 'javascript:', 'mailto:', 'tel:')):
-                    return full_match
-                
-                # 处理绝对路径（以/开头）
-                if path.startswith('/'):
-                    path = path[1:]
-                
-                return f'<{tag}{tag_attrs}{attr}="{mirror_base}/{path}"'
-            
-            modified_text = re.sub(pattern, replace_callback, modified_text, flags=re.IGNORECASE)
-    
-    return modified_text
-
-
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)

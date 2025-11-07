@@ -181,18 +181,7 @@ def advanced_html_rewrite(text, base_url):
     
     return modified_text
 
-# 可选：添加缓存功能
-from flask_caching import Cache
 
-# 配置缓存
-cache = Cache(config={'CACHE_TYPE': 'SimpleCache'})
-cache.init_app(app)
-
-@app.route('/cache/clear')
-def clear_cache():
-    """清空缓存"""
-    cache.clear()
-    return "缓存已清空"
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)

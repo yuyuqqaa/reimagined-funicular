@@ -11,49 +11,85 @@ app = Flask(__name__)
 def detect_encoding(content):
     """自动检测内容编码"""
     try:
+        # 对于短内容，chardet可能检测不准确，使用更保守的策略
+        if len(content) < 100:
+            return 'utf-8'
+        
         result = chardet.detect(content)
-        encoding = result['encoding'] if result['confidence'] > 0.7 else 'utf-8'
-        return encoding.lower()
+        encoding = result['encoding'] if result['confidence'] > 0.6 else 'utf-8'
+        
+        # 验证编码是否有效
+        if encoding and encoding.lower() in ['utf-8', 'gbk', 'gb2312', 'big5', 'gb18030']:
+            return encoding.lower()
+        return 'utf-8'
     except:
         return 'utf-8'
 
 def safe_decode(content, default_encoding='utf-8'):
     """安全解码内容，处理编码问题"""
+    if not content:
+        return "", default_encoding
+        
     try:
-        # 先尝试检测编码
+        # 优先尝试UTF-8
+        try:
+            return content.decode('utf-8'), 'utf-8'
+        except UnicodeDecodeError:
+            pass
+        
+        # 检测编码
         detected_encoding = detect_encoding(content)
         
-        # 常见编码优先级
-        encodings_to_try = [
-            detected_encoding,
-            'utf-8',
-            'gbk',
-            'gb2312',
-            'big5',
-            'latin-1'
-        ]
-        
-        for encoding in set(encodings_to_try):
+        # 尝试检测到的编码
+        if detected_encoding and detected_encoding != 'utf-8':
             try:
-                if encoding:
-                    return content.decode(encoding), encoding
+                return content.decode(detected_encoding), detected_encoding
+            except (UnicodeDecodeError, LookupError):
+                pass
+        
+        # 尝试常见中文编码
+        for encoding in ['gbk', 'gb2312', 'gb18030', 'big5']:
+            try:
+                return content.decode(encoding), encoding
             except (UnicodeDecodeError, LookupError):
                 continue
         
-        # 如果所有编码都失败，使用替代策略
-        return content.decode(default_encoding, errors='replace'), default_encoding
+        # 最后尝试latin-1（不会失败，但可能显示乱码）
+        try:
+            return content.decode('latin-1'), 'latin-1'
+        except:
+            # 最终回退，使用replace处理错误字符
+            return content.decode('utf-8', errors='replace'), 'utf-8'
         
     except Exception as e:
-        # 最终回退
-        return content.decode(default_encoding, errors='replace'), default_encoding
+        # 终极回退方案
+        try:
+            return content.decode('utf-8', errors='replace'), 'utf-8'
+        except:
+            # 如果还是失败，返回空字符串
+            return "", 'utf-8'
 
 def safe_encode(text, encoding='utf-8'):
     """安全编码文本"""
+    if not text:
+        return b""
+        
     try:
-        return text.encode(encoding)
+        # 对于latin-1编码，需要特殊处理非ASCII字符
+        if encoding.lower() == 'latin-1' or encoding.lower() == 'iso-8859-1':
+            # 将非latin-1字符转换为HTML实体或替换
+            encoded_text = text.encode('latin-1', errors='replace')
+            return encoded_text
+        else:
+            return text.encode(encoding, errors='replace')
     except UnicodeEncodeError:
-        # 处理编码错误，使用替代字符
-        return text.encode(encoding, errors='replace')
+        # 回退到UTF-8
+        try:
+            return text.encode('utf-8', errors='replace')
+        except:
+            return text.encode('utf-8', errors='ignore')
+    except Exception:
+        return text.encode('utf-8', errors='replace')
 
 def normalize_chinese_url(url):
     """规范化包含中文的URL"""
@@ -187,19 +223,30 @@ def remove_restrictive_headers(headers):
 
 def fix_content_type(headers, actual_encoding):
     """修复Content-Type头信息中的编码声明"""
+    if not headers:
+        return {}
+        
     new_headers = dict(headers)
     
     content_type = new_headers.get('Content-Type', '') or new_headers.get('content-type', '')
-    if 'text/html' in content_type and 'charset=' in content_type:
-        # 更新编码声明
-        new_headers['Content-Type'] = re.sub(
-            r'charset=[^;]+', 
-            f'charset={actual_encoding}', 
-            content_type
-        )
-    elif 'text/html' in content_type:
-        # 添加编码声明
-        new_headers['Content-Type'] = f'{content_type.split(";")[0]}; charset={actual_encoding}'
+    if not content_type:
+        return new_headers
+    
+    if 'text/html' in content_type:
+        # 确保使用UTF-8编码，避免latin-1问题
+        safe_encoding = 'utf-8'  # 强制使用UTF-8避免编码问题
+        
+        if 'charset=' in content_type:
+            # 更新编码声明
+            new_headers['Content-Type'] = re.sub(
+                r'charset=[^;]+', 
+                f'charset={safe_encoding}', 
+                content_type
+            )
+        else:
+            # 添加编码声明
+            base_type = content_type.split(';')[0].strip()
+            new_headers['Content-Type'] = f'{base_type}; charset={safe_encoding}'
     
     return new_headers
 
@@ -219,7 +266,7 @@ def proxy_handler(url_path):
             decoded_url_path = url_path
         
         # 构建完整的查询字符串和路径
-        query_string = f"?{request.query_string.decode('utf-8', errors='ignore')}" if request.query_string else ""
+        query_string = f"?{request.query_string.decode('latin-1')}" if request.query_string else ""
         target_url_str = decoded_url_path + query_string
         
         # 检查是否包含协议头
@@ -259,22 +306,28 @@ def proxy_handler(url_path):
             # 获取原始内容字节
             content_bytes = response.content
             
-            # 安全解码内容
-            decoded_content, detected_encoding = safe_decode(content_bytes)
+            # 安全解码内容（强制使用UTF-8处理，避免latin-1问题）
+            try:
+                # 先尝试UTF-8
+                decoded_content = content_bytes.decode('utf-8')
+                detected_encoding = 'utf-8'
+            except UnicodeDecodeError:
+                # 如果UTF-8失败，使用安全解码
+                decoded_content, detected_encoding = safe_decode(content_bytes)
             
             # 重写HTML内容
             modified_content = handle_html_rewrite(decoded_content, request.url, detected_encoding)
             
-            # 重新编码内容
-            encoded_content = safe_encode(modified_content, detected_encoding)
+            # 重新编码内容（强制使用UTF-8避免编码问题）
+            encoded_content = safe_encode(modified_content, 'utf-8')
             
             # 移除限制性头信息并修复Content-Type
             response_headers = remove_restrictive_headers(response.headers)
-            response_headers = fix_content_type(response_headers, detected_encoding)
+            response_headers = fix_content_type(response_headers, 'utf-8')  # 强制使用UTF-8
             
             # 确保有正确的Content-Type
             if 'Content-Type' not in response_headers and 'content-type' not in response_headers:
-                response_headers['Content-Type'] = f'text/html; charset={detected_encoding}'
+                response_headers['Content-Type'] = 'text/html; charset=utf-8'
             
             return Response(
                 encoded_content,
@@ -291,9 +344,10 @@ def proxy_handler(url_path):
         response_headers = remove_restrictive_headers(response.headers)
         content_type = response_headers.get('Content-Type', '') or response_headers.get('content-type', '')
         
-        if 'text/' in content_type and 'charset=' not in content_type:
+        if content_type and 'text/' in content_type and 'charset=' not in content_type:
             # 为文本内容添加UTF-8编码声明
-            response_headers['Content-Type'] = f'{content_type.split(";")[0]}; charset=utf-8'
+            base_type = content_type.split(';')[0].strip()
+            response_headers['Content-Type'] = f'{base_type}; charset=utf-8'
         
         return Response(
             stream_with_context(generate()),
@@ -302,14 +356,14 @@ def proxy_handler(url_path):
         )
         
     except requests.exceptions.Timeout:
-        return "请求超时", 504
+        return "请求超时", 504, {'Content-Type': 'text/html; charset=utf-8'}
     except requests.exceptions.RequestException as e:
-        return f"请求失败: {str(e)}", 500
+        return f"请求失败: {str(e)}", 500, {'Content-Type': 'text/html; charset=utf-8'}
     except UnicodeDecodeError as e:
-        return f"编码处理错误: {str(e)}", 500
+        return f"编码处理错误: {str(e)}", 500, {'Content-Type': 'text/html; charset=utf-8'}
     except Exception as e:
         app.logger.error(f"服务器错误: {str(e)}")
-        return f"服务器错误: {str(e)}", 500
+        return f"服务器错误: {str(e)}", 500, {'Content-Type': 'text/html; charset=utf-8'}
 
 @app.after_request
 def add_cors_headers(response):
@@ -317,17 +371,29 @@ def add_cors_headers(response):
     response.headers['Access-Control-Allow-Origin'] = '*'
     response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, PATCH, OPTIONS'
     response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+    
+    # 确保响应有正确的编码头
+    if 'Content-Type' in response.headers and 'text/' in response.headers['Content-Type']:
+        if 'charset=' not in response.headers['Content-Type']:
+            response.headers['Content-Type'] = response.headers['Content-Type'] + '; charset=utf-8'
+    
     return response
 
 if __name__ == '__main__':
-    # 配置Flask支持中文调试信息
+    # 设置正确的编码环境
+    import os
     import sys
-    import codecs
+    import io
     
-    # 确保标准输出支持中文
-    if sys.stdout.encoding != 'UTF-8':
-        sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'strict')
-    if sys.stderr.encoding != 'UTF-8':
-        sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'strict')
+    # 设置系统编码
+    if hasattr(sys, 'setdefaultencoding'):
+        sys.setdefaultencoding('utf-8')
+    
+    # 设置标准输出的编码
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+    
+    # 设置环境变量
+    os.environ['PYTHONIOENCODING'] = 'utf-8'
     
     app.run(host='0.0.0.0', port=5000, debug=True)

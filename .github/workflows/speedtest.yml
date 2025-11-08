@@ -10,7 +10,7 @@ jobs:
       - name: 检出代码
         uses: actions/checkout@v5
         
-      - name: 输出frpc.ini
+      - name: 运行
         run: |
-            apt update && apt install speedtest-cli -y
+            sudo apt update && sudo apt install speedtest-cli -y
             for i in {1..3}; do speedtest --secure --share; done

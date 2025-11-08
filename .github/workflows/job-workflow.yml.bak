@@ -23,7 +23,7 @@ jobs:
           # 更新系统
           sudo apt update
           sudo apt install python3
-          pip install flask gunicorn requests
+          pip install flask gunicorn requests chardet
 
           
           wget https://github.com/masgzy/zy/raw/main/frpc

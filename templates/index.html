@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>TCPing 工具</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"> <style>
+        /* 移动端优先的响应式设计 */
+        body { 
+            font-family: Arial, sans-serif; 
+            max-width: 100%; 
+            margin: 0; 
+            padding: 10px; 
+            box-sizing: border-box; 
+            background: #e9ecef;
+        }
+        .container { 
+            background: #ffffff; 
+            padding: 15px; 
+            border-radius: 8px; 
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1); 
+        }
+        h1 { 
+            font-size: 1.5em; 
+            color: #343a40; 
+            margin-bottom: 20px;
+        }
+        
+        /* 表单元素适配 */
+        input[type="text"] { 
+            width: 100%; 
+            padding: 10px; 
+            margin: 8px 0;
+            border: 1px solid #ced4da;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+        button { 
+            width: 100%; 
+            padding: 10px; 
+            margin-top: 10px;
+            background: #007bff; 
+            color: white; 
+            border: none; 
+            border-radius: 4px; 
+            cursor: pointer;
+            transition: background 0.3s ease;
+        }
+        button:hover {
+            background: #0056b3;
+        }
+        
+        /* 结果显示区 */
+        .result { 
+            margin-top: 20px; 
+            padding: 15px; 
+            border-radius: 4px; 
+            background: #f8f9fa; 
+            border: 1px solid #dee2e6;
+            overflow-x: auto;
+        }
+        .success { border-left: 4px solid #28a745; }
+        .error { border-left: 4px solid #dc3545; }
+        .loading { border-left: 4px solid #ffc107; color: #856404; }
+        
+        /* 预格式化文本 - 终端风格 */
+        pre { 
+            white-space: pre-wrap; 
+            word-wrap: break-word; 
+            margin: 0; 
+            padding: 15px;
+            font-size: 0.9em;
+            line-height: 1.4;
+            font-family: 'Consolas', 'Monaco', monospace; /* 终端字体 */
+            background: #333; /* 模拟终端背景 */
+            color: #ddd; /* 默认前景色 */
+            border-radius: 4px;
+        }
+        
+        /* ANSI 颜色类定义 (关键!) */
+        .ansi-0 { color: #ddd !important; font-weight: normal; } /* Reset */
+        .ansi-92 { color: #00ff00 !important; } /* 92: Bright Green (Success) */
+        .ansi-96 { color: #00ffff !important; } /* 96: Bright Cyan (Info/Command) */
+
+        /* 桌面端优化 (大于 600px 宽度) */
+        @media (min-width: 600px) {
+            body {
+                max-width: 800px;
+                padding: 20px;
+            }
+            input[type="text"] {
+                width: 300px;
+            }
+            button {
+                width: auto;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>TCP 端口检测工具</h1>
+        <form id="tcpingForm">
+            <div>
+                <label for="host">域名或IP地址:</label>
+                <input type="text" id="host" name="host" placeholder="example.com 或 192.168.1.1" required>
+            </div>
+            <div>
+                <label for="port">端口号 (默认 80):</label>
+                <input type="text" id="port" name="port" placeholder="80" value="80">
+            </div>
+            <div>
+                <label for="timeout">超时时间(秒，默认 5):</label>
+                <input type="text" id="timeout" name="timeout" placeholder="5" value="5">
+            </div>
+            <button type="submit">开始检测 (测试3次)</button>
+        </form>
+        
+        <div id="result"></div>
+    </div>
+
+    <script>
+        /**
+         * 将包含 [96m 格式颜色码的文本转换为带有 CSS 类的 HTML
+         * @param {string} text - 包含 ANSI 颜色码的文本
+         * @returns {string} - 转换后的 HTML 字符串
+         */
+        function ansi_to_html(text) {
+            if (!text) return '';
+
+            // 1. 将特殊 HTML 字符实体化
+            let html = text
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+
+            // 正则表达式匹配 [96m, [92m, [0m 序列
+            const customAnsiRegex = /\[(\d+)m/g; 
+
+            // 2. 替换 ANSI 序列为 HTML <span> 标签
+            html = html.replace(customAnsiRegex, (match, code) => {
+                if (code === '0' || (parseInt(code) >= 91 && parseInt(code) <= 97)) {
+                    // 使用 [0m 来闭合前一个 span
+                    const closeTag = (code === '0' && html.includes('<span')) ? '</span>' : '';
+                    
+                    // 打开新的 span
+                    const openTag = `<span class="ansi-${code}">`;
+                    
+                    return `${closeTag}${openTag}`;
+                }
+                return match; // 不匹配的保持原样
+            });
+
+            // 3. 确保所有打开的 span 在末尾被闭合
+            if (html.includes('<span')) {
+                html += '</span>'; 
+            }
+
+            return html;
+        }
+
+        // 核心修复：确保在 DOM 完全加载后再绑定事件
+        document.addEventListener('DOMContentLoaded', (event) => {
+            const tcpingForm = document.getElementById('tcpingForm');
+            const resultDiv = document.getElementById('result');
+
+            if (!tcpingForm) {
+                console.error("Error: tcpingForm element not found!");
+                resultDiv.innerHTML = '<div class="result error">初始化错误：未找到表单元素。请检查HTML ID。</div>';
+                return;
+            }
+
+            tcpingForm.addEventListener('submit', function(e) {
+                // ❗ 核心修复：确保立即阻止默认行为，防止页面刷新 ❗
+                e.preventDefault(); 
+                
+                const host = document.getElementById('host').value;
+                const port = document.getElementById('port').value || '80';
+                const timeout = document.getElementById('timeout').value || '5';
+                
+                resultDiv.innerHTML = '<div class="result loading">检测中... (测试3次)</div>';
+                
+                fetch('/tcping/', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        host: host,
+                        port: parseInt(port),
+                        timeout: parseInt(timeout)
+                    })
+                })
+                .then(response => {
+                    // 检查响应状态，如果不是 2xx，也尝试解析 JSON 错误信息
+                    if (!response.ok && response.status !== 400 && response.status !== 500) {
+                         throw new Error('网络请求失败，HTTP状态码: ' + response.status);
+                    }
+                    return response.json();
+                })
+                .then(data => {
+                    const displayHost = data.host || host;
+                    const displayPort = data.port || port;
+
+                    const formattedOutput = ansi_to_html(data.output);
+
+                    if (data.success) {
+                        resultDiv.innerHTML = `<div class="result success">
+                            <h3>检测结果 - ${displayHost}:${displayPort}</h3>
+                            <pre>${formattedOutput}</pre>
+                            <p><strong>检测时间:</strong> ${new Date().toLocaleString()}</p>
+                        </div>`;
+                    } else {
+                        resultDiv.innerHTML = `<div class="result error">
+                            <h3>检测结果 - ${displayHost}:${displayPort}</h3>
+                            <pre>${formattedOutput}</pre>
+                            <p><strong>错误信息:</strong> ${data.error}</p>
+                            <p><strong>检测时间:</strong> ${new Date().toLocaleString()}</p>
+                        </div>`;
+                    }
+                })
+                .catch(error => {
+                    resultDiv.innerHTML = `<div class="result error">
+                        <h3>请求错误</h3>
+                        <p>请求失败或服务器无响应: ${error.message || error}</p>
+                    </div>`;
+                });
+            });
+        });
+    </script>
+</body>
+</html>

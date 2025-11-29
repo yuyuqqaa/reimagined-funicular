@@ -109,10 +109,6 @@
                 <input type="text" id="port" name="port" placeholder="80" value="80">
             </div>
             <div>
-                <label for="count">次数(默认 3):</label>
-                <input type="text" id="count" name="count" placeholder="3" value="3">
-            </div>
-            <div>
                 <label for="timeout">超时时间(秒，默认 5):</label>
                 <input type="text" id="timeout" name="timeout" placeholder="5" value="5">
             </div>
@@ -182,7 +178,6 @@
                 const host = document.getElementById('host').value;
                 const port = document.getElementById('port').value || '80';
                 const timeout = document.getElementById('timeout').value || '5';
-                const count = document.getElementById('count').value || '3';
                 
                 resultDiv.innerHTML = '<div class="result loading">检测中... (测试3次)</div>';
                 
@@ -195,7 +190,6 @@
                         host: host,
                         port: parseInt(port),
                         timeout: parseInt(timeout)
-                        count: parseInt(count)
                     })
                 })
                 .then(response => {

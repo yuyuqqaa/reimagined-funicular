@@ -195,8 +195,9 @@
                     body: JSON.stringify({
                         host: host,
                         port: parseInt(port),
-                        timeout: parseInt(timeout),
-                        count: parseInt(count)
+                        count: parseInt(count),
+                        timeout: parseInt(timeout)
+                        
                     })
                 })
                 .then(response => {

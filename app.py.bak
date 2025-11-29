@@ -163,7 +163,7 @@ def is_valid_ip(ip):
         except socket.error:
             return False
 
-def safe_tcping(host, port=80, timeout=5, count=3):
+def safe_tcping(host, port=80, count=3, timeout=5,):
     """
     使用 tcping 命令进行安全的TCP连接测试，测试3次
     返回: (success, output, error_message)
@@ -264,7 +264,7 @@ def tcping_api():
                 'host': host, 'port': port
             }), 400
         
-        success, output, error = safe_tcping(host, port, timeout)
+        success, output, error = safe_tcping(host, port, count, timeout)
         
         return jsonify({
             'success': success,

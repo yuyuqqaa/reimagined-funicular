@@ -181,8 +181,9 @@
                 
                 const host = document.getElementById('host').value;
                 const port = document.getElementById('port').value || '80';
-                const timeout = document.getElementById('timeout').value || '5';
                 const count = document.getElementById('count').value || '3';
+                const timeout = document.getElementById('timeout').value || '5';
+                
                 
                 resultDiv.innerHTML = '<div class="result loading">检测中... (测试3次)</div>';
                 

@@ -13,7 +13,6 @@ ENABLE_MODIFICATION = True
 # M3U8代理前缀
 M3U8_PROXY_PREFIX = "[[[m3u8_host]]]"
 
-@app.route('/tcping')
 
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>')

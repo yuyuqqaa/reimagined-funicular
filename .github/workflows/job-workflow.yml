@@ -35,7 +35,7 @@ jobs:
           
           # 启动 frpc 服务（第一次）
           bash start.sh
-          cat /home/runner/work/reimagined-funicular/reimagined-funicular/logs/gunicorn_error.log
+         
 
           # 每隔1小时输出一条日志信息
           for i in {1..5}; do

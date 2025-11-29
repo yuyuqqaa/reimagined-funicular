@@ -2,13 +2,14 @@ from flask import Flask, request, Response
 import requests
 from urllib.parse import urljoin, urlparse
 import re
+import base64
 
 app = Flask(__name__)
 
 # 修改开关：True启用修改，False禁用修改
 ENABLE_MODIFICATION = True
 # M3U8代理前缀
-M3U8_PROXY_PREFIX = "https://cfrp.996855.xyz/"
+M3U8_PROXY_PREFIX = base64.b64decode("[[[m3u8_host]]]").decode('utf-8')
 
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>')
@@ -80,7 +81,9 @@ def is_m3u8_file(url):
 def handle_html_rewrite(response, original_url):
     """处理HTML重写，修改相对链接"""
     text = response.text
-    host = "uscf.996855.xyz"
+    
+   
+    host = base64.b64decode("[[[host]]]").decode('utf-8')
     mirror_base = f"{request.scheme}://{host}{request.path}"
     
     # 替换相对链接为绝对链接

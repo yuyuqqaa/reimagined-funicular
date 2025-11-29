@@ -264,7 +264,7 @@ def tcping_api():
                 'host': host, 'port': port
             }), 400
         
-        success, output, error = safe_tcping(host, port, timeout)
+        success, output, error = safe_tcping(host, port, count, timeout)
         
         return jsonify({
             'success': success,

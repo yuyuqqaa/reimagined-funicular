@@ -163,7 +163,7 @@ def is_valid_ip(ip):
         except socket.error:
             return False
 
-def safe_tcping(host, port=80, timeout=5):
+def safe_tcping(host, port=80, timeout=5, count=3):
     """
     使用 tcping 命令进行安全的TCP连接测试，测试3次
     返回: (success, output, error_message)
@@ -192,7 +192,7 @@ def safe_tcping(host, port=80, timeout=5):
     try:
         cmd = [
             'tcping',
-            '-c', '3',
+            '-c', str(count),
             '-t', str(timeout),
             host,
             str(port)
@@ -253,6 +253,7 @@ def tcping_api():
         
         host = data.get('host', '').strip()
         port = data.get('port', 80)
+        count = data.get('count', 3)
         timeout = data.get('timeout', 5)
         
         if not host:

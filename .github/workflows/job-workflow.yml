@@ -32,8 +32,8 @@ jobs:
           sed -i 's#\[\[\[host\]\]\]#${{ secrets.HOST }}#g' app.py
           
           #wget https://github.com/yuyuqqaa/reimagined-funicular/raw/main/start.sh
-          cp tcping /usr/bin/tcping
-          chmod +x /usr/bin/tcping
+          sudo cp tcping /usr/bin/tcping
+          sudo chmod +x /usr/bin/tcping
           # 启动 frpc 服务（第一次）
           bash start.sh
          

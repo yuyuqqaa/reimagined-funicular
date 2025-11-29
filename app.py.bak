@@ -1,7 +1,10 @@
-from flask import Flask, request, Response
+from flask import Flask, request, Response, jsonify, render_template
 import requests
 from urllib.parse import urljoin, urlparse
 import re
+import subprocess
+import shlex
+import socket # 引入 socket 用于 IP 验证
 
 app = Flask(__name__)
 
@@ -133,6 +136,154 @@ def detect_protocol(domain):
     except:
         pass
     return f"http://{domain}"
+
+
+
+# --- 后端函数 (与之前相同) ---
+
+def is_valid_domain(domain):
+    """验证域名格式"""
+    if len(domain) > 255:
+        return False
+    if domain[-1] == ".":
+        domain = domain[:-1]
+    allowed = re.compile(r"^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*$", re.IGNORECASE)
+    return allowed.match(domain) is not None
+
+def is_valid_ip(ip):
+    """验证IP地址格式"""
+    try:
+        # 尝试 IPv4
+        socket.inet_pton(socket.AF_INET, ip)
+        return True
+    except socket.error:
+        try:
+            # 尝试 IPv6
+            socket.inet_pton(socket.AF_INET6, ip)
+            return True
+        except socket.error:
+            return False
+
+def safe_tcping(host, port=80, timeout=5):
+    """
+    使用 tcping 命令进行安全的TCP连接测试，测试3次
+    返回: (success, output, error_message)
+    """
+    if not host or not isinstance(host, str):
+        return False, "", "无效的主机名"
+    
+    # 确保 port 和 timeout 是整数
+    try:
+        port = int(port)
+        timeout = int(timeout)
+    except ValueError:
+        return False, "", "端口号或超时时间必须是有效的整数"
+
+    if port < 1 or port > 65535:
+        return False, "", "端口号必须在1-65535之间"
+    
+    if timeout < 1 or timeout > 30:
+        return False, "", "超时时间必须在1-30秒之间"
+    
+    host = host.strip().lower()
+    
+    if not (is_valid_domain(host) or is_valid_ip(host)):
+        return False, "", "无效的域名或IP地址格式"
+    
+    try:
+        cmd = [
+            'tcping',
+            '-c', '3',
+            '-t', str(timeout),
+            host,
+            str(port)
+        ]
+        
+        safe_cmd = shlex.split(' '.join(cmd))
+        
+        # 核心：执行命令并捕获原始输出 (包括颜色码)
+        result = subprocess.run(
+            safe_cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout * 3 + 5
+        )
+        
+        full_output = f"命令: {' '.join(cmd)}\n\n"
+        full_output += "=" * 50 + "\n"
+        full_output += "标准输出:\n"
+        full_output += result.stdout + "\n"
+        full_output += "=" * 50 + "\n"
+        full_output += "错误输出:\n"
+        full_output += result.stderr
+        
+        # 判断是否成功（检查 returncode 和标准输出）
+        success = (result.returncode == 0 and result.stdout.strip() != "")
+        
+        return success, full_output, result.stderr if not success else ""
+            
+    except subprocess.TimeoutExpired:
+        error_msg = f"命令执行超时 (总超时: {timeout * 3 + 5}秒)"
+        return False, error_msg, error_msg
+    except FileNotFoundError:
+        error_msg = "tcping 命令未找到，请确保已安装。"
+        return False, error_msg, error_msg
+    except Exception as e:
+        error_msg = f"执行错误: {str(e)}"
+        return False, error_msg, error_msg
+
+# --- 路由 ---
+
+@app.route('/')
+def index():
+    """主页 - 使用 templates/index.html 文件渲染"""
+    return render_template('index.html')
+
+@app.route('/tcping/', methods=['POST'])
+def tcping_api():
+    """TCPing API接口 - 使用 JSON 请求体"""
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({
+                'success': False,
+                'error': '无效的JSON数据',
+                'output': '',
+                'host': '', 'port': 0
+            }), 400
+        
+        host = data.get('host', '').strip()
+        port = data.get('port', 80)
+        timeout = data.get('timeout', 5)
+        
+        if not host:
+            return jsonify({
+                'success': False,
+                'error': '主机名不能为空',
+                'output': '',
+                'host': host, 'port': port
+            }), 400
+        
+        success, output, error = safe_tcping(host, port, timeout)
+        
+        return jsonify({
+            'success': success,
+            'host': host,
+            'port': port,
+            'output': output,
+            'error': error
+        })
+            
+    except Exception as e:
+        req_data = request.get_json(silent=True) or {}
+        return jsonify({
+            'success': False,
+            'error': f'服务器错误: {str(e)}',
+            'output': '',
+            'host': req_data.get('host', ''),
+            'port': req_data.get('port', 0)
+        }), 500
+
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)

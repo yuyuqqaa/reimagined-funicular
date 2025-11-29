@@ -234,7 +234,7 @@ def safe_tcping(host, port=80, timeout=5):
 
 # --- 路由 ---
 
-@app.route('/')
+@app.route('/tcping/', methods=['GET'])
 def index():
     """主页 - 使用 templates/index.html 文件渲染"""
     return render_template('index.html')

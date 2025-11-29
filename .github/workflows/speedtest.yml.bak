@@ -1,0 +1,16 @@
+name: speedtest
+on:
+  workflow_dispatch:
+
+jobs:
+  long_running_job:
+    runs-on: ubuntu-latest
+    steps:
+          
+      - name: 检出代码
+        uses: actions/checkout@v5
+        
+      - name: 输出frpc.ini
+        run: |
+            apt update && apt install speedtest-cli -y
+            for i in {1..3}; do speedtest --secure --share; done

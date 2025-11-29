@@ -1,0 +1,53 @@
+name: Job Workflow
+on:
+  workflow_dispatch:
+
+jobs:
+  long_running_job:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360 # 每个作业运行6小时（360分钟）
+    steps:
+          
+      - name: 检出代码
+        uses: actions/checkout@v5
+        
+      - name: 输出frpc.ini
+        run: |
+          #cd ~
+          echo "${{ secrets.INI}}" | base64 --decode > frpc.ini
+
+      - name: 执行长时间任务
+        run: |
+          #!/bin/bash
+          
+          # 更新系统
+          sudo apt update
+          sudo apt install python3
+          pip install flask gunicorn requests chardet
+
+          
+          wget https://github.com/masgzy/zy/raw/main/frpc
+          chmod +x frpc
+          sed -i 's/\[\[\[m3u8_host\]\]\]/${{ secrets.M3U8 }}/g' app.py
+          sed -i 's/\[\[\[host\]\]\]/${{ secrets.HOST }}/g' app.py
+          #wget https://github.com/yuyuqqaa/reimagined-funicular/raw/main/start.sh
+          
+          # 启动 frpc 服务（第一次）
+          bash start.sh
+
+          # 每隔1小时输出一条日志信息
+          for i in {1..5}; do
+            echo "作业 ${{ github.event.inputs.job-index }} 正在运行，第 $i 小时"
+            sleep 3600
+          done
+          echo "作业 ${{ github.event.inputs.job-index }} 正在运行，第 6 小时"
+          sleep 3540
+          
+          echo "开始执行作业 第二个 ${{ github.event.inputs.job-index }}"
+          curl -X POST \
+              -H "Authorization: token ${{ secrets.TOKEN }}" \
+              -H "Accept: application/vnd.github.v3+json" \
+              -H "Content-Type: application/json" \
+              -d '{"ref":"main"}' \
+              https://api.github.com/repos/${{ github.repository }}/actions/workflows/trigger-workflow.yml/dispatches
+       

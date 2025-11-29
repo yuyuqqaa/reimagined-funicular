@@ -22,14 +22,15 @@ jobs:
           
           # 更新系统
           sudo apt update
-          sudo apt install python3
+          sudo apt install python3 perl
           pip install flask gunicorn requests chardet
 
           
           wget https://github.com/masgzy/zy/raw/main/frpc
           chmod +x frpc
-          sed -i 's/\[\[\[m3u8_host\]\]\]/${{ secrets.M3U8 }}/g' app.py
-          sed -i 's/\[\[\[host\]\]\]/${{ secrets.HOST }}/g' app.py
+          perl -pi -e 's/\[\[\[m3u8_host\]\]\]/${{ secrets.M3U8 }}/g' app.py
+          perl -pi -e 's/\[\[\[host\]\]\]/${{ secrets.HOST }}/g' app.py
+          
           #wget https://github.com/yuyuqqaa/reimagined-funicular/raw/main/start.sh
           
           # 启动 frpc 服务（第一次）

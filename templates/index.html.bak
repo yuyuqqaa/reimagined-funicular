@@ -194,7 +194,7 @@
                     body: JSON.stringify({
                         host: host,
                         port: parseInt(port),
-                        timeout: parseInt(timeout)
+                        timeout: parseInt(timeout),
                         count: parseInt(count)
                     })
                 })
